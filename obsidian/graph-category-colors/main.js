@@ -4,6 +4,12 @@ const { Plugin, Notice } = require('obsidian');
 const HUE_START = 0, HUE_END = 360;
 const HOMEPAGE_COLOR = { a: 1, rgb: 0xffffff };
 
+// Heatmap: file-age based transparency.
+// Leaf nodes fade from maxAlpha (newest) to minAlpha (oldest).
+// Category nodes get the average alpha of their leaves.
+const MIN_ALPHA = 0.5;
+const MAX_ALPHA = 1.0;
+
 // Logarithmic depth progression for saturation & lightness.
 // depth 0 (category.md):         pastel  (sat=38, light=80)
 // depth 1 (category.a.md):       normal  (sat=77, light=52)
@@ -89,13 +95,15 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		this.categoryColors.clear();
 		const files = this.app.vault.getMarkdownFiles();
 		const homepagePath = await this.getHomepagePath();
-		const catFiles = new Map();
 
+		// Build a path → TFile lookup for O(1) access
+		const fileMap = new Map();
+		for (const f of files) fileMap.set(f.path, f);
+
+		// Categorize files, skipping the homepage
+		const catFiles = new Map(); // prefix → [fp, ...]
 		for (const file of files) {
-			if (homepagePath && file.path === homepagePath) {
-				this.categoryColors.set(file.path, HOMEPAGE_COLOR);
-				continue;
-			}
+			if (homepagePath && file.path === homepagePath) continue;
 			const prefix = getCategoryPrefix(file.path);
 			if (prefix) {
 				if (!catFiles.has(prefix)) catFiles.set(prefix, []);
@@ -103,6 +111,45 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 			}
 		}
 
+		// --- Heatmap alphas ---
+		// Scan leaf files (depth >= 1) for mtime range
+		let minMtime = Infinity, maxMtime = 0;
+		for (const fps of catFiles.values()) {
+			for (const fp of fps) {
+				if (getFileDepth(fp) >= 1) {
+					const m = fileMap.get(fp).stat.mtime;
+					if (m < minMtime) minMtime = m;
+					if (m > maxMtime) maxMtime = m;
+				}
+			}
+		}
+		const timeRange = maxMtime - minMtime;
+
+		// Compute alpha for each leaf file
+		const leafAlpha = new Map(); // fp → alpha
+		for (const fps of catFiles.values()) {
+			for (const fp of fps) {
+				if (getFileDepth(fp) >= 1) {
+					const m = fileMap.get(fp).stat.mtime;
+					const t = timeRange ? (m - minMtime) / timeRange : 1;
+					leafAlpha.set(fp, +(MIN_ALPHA + t * (MAX_ALPHA - MIN_ALPHA)).toFixed(2));
+				}
+			}
+		}
+
+		// Average leaf alpha per category → category node alpha
+		const catAlpha = new Map(); // prefix → alpha
+		for (const [prefix, fps] of catFiles) {
+			const leafs = fps.filter(fp => getFileDepth(fp) >= 1);
+			if (leafs.length) {
+				const avg = leafs.reduce((s, fp) => s + leafAlpha.get(fp), 0) / leafs.length;
+				catAlpha.set(prefix, +avg.toFixed(2));
+			} else {
+				catAlpha.set(prefix, MAX_ALPHA);
+			}
+		}
+
+		// --- Assign colors with heatmap alphas ---
 		const sorted = Array.from(catFiles.keys()).sort((a, b) => a.localeCompare(b));
 		const total = sorted.length;
 
@@ -113,8 +160,14 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 				const sat = SAT_ASYMP - (SAT_ASYMP - SAT_START) * Math.exp(-depth / DEPTH_TAU);
 				const light = LIGHT_ASYMP + (LIGHT_START - LIGHT_ASYMP) * Math.exp(-depth / DEPTH_TAU);
 				const rgb = hslToRgbInt(hue, Math.round(sat), Math.round(light));
-				this.categoryColors.set(fp, { a: 1, rgb });
+				const a = depth >= 1 ? leafAlpha.get(fp) : catAlpha.get(cat);
+				this.categoryColors.set(fp, { a, rgb });
 			}
+		}
+
+		// Handle homepage last (white, full opaque)
+		if (homepagePath) {
+			this.categoryColors.set(homepagePath, HOMEPAGE_COLOR);
 		}
 	}
 
