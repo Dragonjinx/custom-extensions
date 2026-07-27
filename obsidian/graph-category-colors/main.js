@@ -47,7 +47,6 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		this.categoryColors = new Map(); // fp → { a: int, rgb: int }
 		this._patched = new WeakSet();    // renderers with active prerender hook
 		this._preCleanups = [];           // cleanup fns for prerender hooks
-		this._hoverSetup = new WeakSet(); // renderers with hover detection set up
 
 		await this.rebuild();
 		this.applyToGraphs();
@@ -64,19 +63,12 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 			name: 'Refresh graph category colors',
 			callback: async () => { await this.rebuild(); new Notice('Graph colors refreshed'); },
 		});
-
-		this.addCommand({
-			id: 'dump-graph-structure',
-			name: 'Dump graph renderer structure to console',
-			callback: () => this.dumpGraphStructure(),
-		});
 	}
 
 	onunload() {
 		for (const fn of this._preCleanups) fn();
 		this._preCleanups = [];
 		this._patched = new WeakSet();
-		this._hoverSetup = new WeakSet();
 		this.restoreGraphs();
 		this.cleanupFileExplorerStyles();
 	}
@@ -176,9 +168,9 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		}
 	}
 
-	// --- Graph node coloring via renderer.nodeLookup ---
+	// --- Graph node coloring via renderer.nodeLookup + PIXI tint ---
 
-	/** Apply colors to every node in the given renderer */
+	/** Set base colors on nodeLookup AND on every node's circle tint */
 	_applyColors(renderer) {
 		const nl = renderer?.nodeLookup;
 		if (!nl) return false;
@@ -186,7 +178,62 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		for (const [fp, color] of this.categoryColors) {
 			if (nl[fp]) { nl[fp].color = color; count++; }
 		}
+		// Also set PIXI circle tint directly (survives hover reset)
+		if (renderer.nodes) {
+			for (const node of renderer.nodes) {
+				const c = this.categoryColors.get(node.id);
+				if (c && node.circle?.tint !== undefined) {
+					node.circle.tint = c.rgb;
+				}
+			}
+		}
 		return count > 0;
+	}
+
+	/** On hover: tint connected edges + connected nodes to the hovered node's color */
+	_applyHoverHighlight(renderer) {
+		const hl = renderer.highlightNode;
+		if (!hl) return;
+
+		const hoveredPath = typeof hl === 'string' ? hl : hl.id;
+		if (!hoveredPath) return;
+
+		const hoverColor = this.categoryColors.get(hoveredPath);
+		if (!hoverColor) return;
+
+		// Find the hovered node object in renderer.nodes
+		const hoveredNode = typeof hl === 'string'
+			? renderer.nodes?.find(n => n.id === hl)
+			: hl;
+		if (!hoveredNode) return;
+
+		// --- Connected edges: set arrow tint to hovered node's color ---
+		for (const link of renderer.links || []) {
+			if (link.source === hoveredNode || link.target === hoveredNode) {
+				if (link.arrow?.tint !== undefined) {
+					link.arrow.tint = hoverColor.rgb;
+				}
+			}
+		}
+
+		// --- Connected nodes: set circle tint to hovered node's color ---
+		for (const link of renderer.links || []) {
+			if (link.source === hoveredNode && link.target !== hoveredNode) {
+				if (link.target?.circle?.tint !== undefined) {
+					link.target.circle.tint = hoverColor.rgb;
+				}
+			} else if (link.target === hoveredNode && link.source !== hoveredNode) {
+				if (link.source?.circle?.tint !== undefined) {
+					link.source.circle.tint = hoverColor.rgb;
+				}
+			}
+		}
+
+		// --- Hovered node itself: full opacity with its color ---
+		if (hoveredNode.circle) {
+			hoveredNode.circle.tint = hoverColor.rgb;
+			hoveredNode.circle.alpha = 1.0;
+		}
 	}
 
 	applyToGraphs() {
@@ -201,113 +248,23 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		const renderer = view?.dataEngine?.renderer;
 		if (!renderer) return;
 
-		// Install a prerender hook on the PIXI renderer so colors survive
-		// node re-creation (e.g. tab switch). Only once per renderer.
+		// Install a prerender hook on the PIXI renderer — fires before every frame
 		if (!this._patched.has(renderer)) {
 			this._patched.add(renderer);
 
-			// Try PIXI renderer 'prerender' event (PIXI v5+)
 			const pr = renderer.px?.renderer;
 			if (pr && typeof pr.on === 'function') {
 				const handler = () => {
 					this._applyColors(renderer);
-					this._applyHoverEdges(renderer);
+					this._applyHoverHighlight(renderer);
 				};
 				pr.on('prerender', handler);
 				this._preCleanups.push(() => pr.off('prerender', handler));
 			}
 		}
 
-		// Set up hover detection once per renderer
-		if (!this._hoverSetup.has(renderer)) {
-			this._hoverSetup.add(renderer);
-			this._setupHoverDetection(renderer);
-		}
-
-		// Apply immediately and request a re-render
 		this._applyColors(renderer);
 		if (renderer.renderCallback) renderer.renderCallback();
-	}
-
-	// --- Hover detection & edge highlighting ---
-
-	_setupHoverDetection(renderer) {
-		try {
-			const stage = renderer.px?.stage;
-			if (!stage || typeof stage.on !== 'function') return;
-
-			// Track hover state using PIXI pointer events at the stage level
-			stage.on('pointerover', (event) => {
-				this._onNodeHover(event, renderer);
-			});
-			stage.on('pointerout', () => {
-				this._hoveredNode = null;
-			});
-		} catch (e) {
-			console.warn('graph-category-colors: hover setup failed', e);
-		}
-	}
-
-	_onNodeHover(event, renderer) {
-		try {
-			// Walk up the PIXI display tree to find the node container
-			let target = event.target;
-			while (target) {
-				// Check if this display object has a known node path
-				// Nodes in renderer.nodes have an `.id` property (file path)
-				// Their PIXI circle may be linked via `target === node.circle`
-				for (const node of renderer.nodes || []) {
-					if (target === node.circle) {
-						this._hoveredNode = node.id;
-						return;
-					}
-				}
-				target = target.parent;
-			}
-		} catch (e) {
-			// Ignore errors in hover detection
-		}
-	}
-
-	/** In prerender: match connected-edge tints to the hovered node's color */
-	_applyHoverEdges(renderer) {
-		try {
-			const hoveredPath = this._hoveredNode;
-			if (!hoveredPath) return;
-
-			const color = this.categoryColors.get(hoveredPath);
-			if (!color) return;
-
-			// Find edge container in the PIXI stage
-			// Edges are typically in a child container of the stage
-			const stage = renderer.px?.stage;
-			if (!stage) return;
-
-			// Find edge children — they're Graphics objects in a sub-container
-			const edgeContainer = stage.children.find(c =>
-				c.name === 'edges' || c.label === 'edges'
-			);
-
-			if (edgeContainer) {
-				// Set tint on all edges to the hovered node's color
-				// The renderer will restore tints when hover ends
-				const tint = color.rgb;
-				for (const child of edgeContainer.children) {
-					if (child.tint !== undefined) {
-						child.tint = tint;
-					}
-				}
-			} else {
-				// Fallback: try all Graphics in the stage
-				for (const child of stage.children) {
-					if (child.tint !== undefined && child !== renderer.px?.stage) {
-						child.tint = color.rgb;
-					}
-				}
-			}
-		} catch (e) {
-			// Silent — hover coloring is best-effort
-		}
 	}
 
 	restoreGraphs() {
@@ -319,70 +276,14 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 				for (const fp of this.categoryColors.keys()) {
 					if (nl[fp]) delete nl[fp].color;
 				}
+				// Also reset PIXI tints on node circles
+				if (renderer.nodes) {
+					for (const node of renderer.nodes) {
+						if (node.circle?.tint !== undefined) node.circle.tint = 0xffffff;
+					}
+				}
 				if (renderer.renderCallback) renderer.renderCallback();
 			});
-		}
-	}
-
-	// --- Diagnostic ---
-
-	dumpGraphStructure() {
-		for (const viewType of ['graph', 'localgraph']) {
-			for (const leaf of this.app.workspace.getLeavesOfType(viewType)) {
-				const r = leaf.view?.dataEngine?.renderer;
-				if (!r) { console.log(viewType + ': no renderer'); continue; }
-				console.log('=== ' + viewType + ' renderer keys ===', JSON.stringify(Object.keys(r)));
-				if (r.nodes && r.nodes.length) {
-					const n0 = r.nodes[0];
-					console.log('Sample node keys:', Object.keys(n0));
-					console.log('  id:', n0.id);
-					if (n0.circle) {
-						const c = n0.circle;
-						const ownKeys = Object.getOwnPropertyNames(c).filter(k => k[0] !== '_');
-						console.log('  circle own keys:', ownKeys);
-						console.log('  circle tint:', c.tint !== undefined ? '0x' + c.tint.toString(16).padStart(6, '0') : 'undefined');
-						console.log('  circle alpha:', c.alpha);
-						console.log('  circle interactive:', c.interactive);
-						console.log('  circle isContainer:', !!c.children);
-						if (c.children) console.log('  circle children:', c.children.length);
-					}
-				}
-				if (r.nodeLookup) {
-					const keys = Object.keys(r.nodeLookup);
-					console.log('nodeLookup entries:', keys.length);
-					if (keys.length) {
-						const nlKeys = Object.keys(r.nodeLookup[keys[0]]);
-						console.log('nodeLookup entry keys:', nlKeys);
-						if (r.nodeLookup[keys[0]].color) console.log('  sample color:', r.nodeLookup[keys[0]].color);
-					}
-				}
-				// Explore PIXI stage tree
-				const stage = r.px?.stage;
-				if (stage) {
-					console.log('--- PIXI stage tree ---');
-					this._dumpStage(stage, 0);
-				}
-				// Check for edge-related properties
-				const edgeProps = Object.keys(r).filter(k => k.toLowerCase().includes('edge') || k.toLowerCase().includes('link'));
-				if (edgeProps.length) console.log('Edge/link props:', edgeProps);
-			}
-		}
-		new Notice('Renderer structure dumped to console (Ctrl+Shift+I)');
-	}
-
-	_dumpStage(obj, depth) {
-		const indent = '  '.repeat(depth);
-		const name = obj.name || obj.label || obj.constructor?.name || '?';
-		const x = Math.round(obj.x || 0);
-		const y = Math.round(obj.y || 0);
-		const tint = obj.tint !== undefined ? '0x' + obj.tint.toString(16).padStart(6, '0') : '';
-		const alpha = obj.alpha !== undefined ? obj.alpha.toFixed(2) : '';
-		const vis = obj.visible !== undefined ? (obj.visible ? 'V' : 'H') : '';
-		const interactive = obj.interactive ? ' I' : '';
-		const children = obj.children ? (obj.children.length + ' children') : '';
-		console.log(indent + name + ' @' + x + ',' + y + ' a:' + alpha + ' ' + tint + ' ' + vis + interactive + ' ' + children);
-		if (obj.children && depth < 4) {
-			for (const c of obj.children) this._dumpStage(c, depth + 1);
 		}
 	}
 
