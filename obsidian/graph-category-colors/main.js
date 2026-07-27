@@ -111,28 +111,20 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 			}
 		}
 
-		// --- Heatmap alphas ---
-		// Scan leaf files (depth >= 1) for mtime range
-		let minMtime = Infinity, maxMtime = 0;
-		for (const fps of catFiles.values()) {
-			for (const fp of fps) {
-				if (getFileDepth(fp) >= 1) {
-					const m = fileMap.get(fp).stat.mtime;
-					if (m < minMtime) minMtime = m;
-					if (m > maxMtime) maxMtime = m;
-				}
-			}
-		}
-		const timeRange = maxMtime - minMtime;
+		// --- Heatmap alphas (absolute recency) ---
+		// Age-based: newer → brighter, older → faded (logarithmic curve, capped at 1 year)
+		const MS_DAY = 86400000;
+		const LOG_YEAR = Math.log(1 + 365);
+		const now = Date.now();
 
-		// Compute alpha for each leaf file
 		const leafAlpha = new Map(); // fp → alpha
 		for (const fps of catFiles.values()) {
 			for (const fp of fps) {
 				if (getFileDepth(fp) >= 1) {
-					const m = fileMap.get(fp).stat.mtime;
-					const t = timeRange ? (m - minMtime) / timeRange : 1;
-					leafAlpha.set(fp, +(MIN_ALPHA + t * (MAX_ALPHA - MIN_ALPHA)).toFixed(2));
+					const ageMs = now - fileMap.get(fp).stat.mtime;
+					const days = Math.max(0, ageMs / MS_DAY);
+					const t = Math.min(Math.log(1 + days) / LOG_YEAR, 1);
+					leafAlpha.set(fp, +(MAX_ALPHA - t * (MAX_ALPHA - MIN_ALPHA)).toFixed(2));
 				}
 			}
 		}
