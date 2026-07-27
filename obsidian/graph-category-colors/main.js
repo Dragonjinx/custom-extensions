@@ -259,14 +259,6 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		renderer.colors.arrow.a = 1;
 	}
 
-	/** Restore original hover handlers on unload */
-	_restoreHoverHooks(renderer) {
-		if (!this._hoverHooked.has(renderer)) return;
-		this._hoverHooked.delete(renderer);
-		// Can't easily restore the original without storing it
-		// But since the original is still called via .call(), the behavior is preserved
-	}
-
 	applyToGraphs() {
 		for (const viewType of ['graph', 'localgraph']) {
 			this.app.workspace.getLeavesOfType(viewType).forEach((leaf) => {
@@ -279,7 +271,7 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		const renderer = view?.dataEngine?.renderer;
 		if (!renderer) return;
 
-			// Install a prerender hook on the PIXI renderer — fires before every frame
+		// Install a prerender hook on the PIXI renderer — fires before every frame
 		if (!this._patched.has(renderer)) {
 			this._patched.add(renderer);
 
