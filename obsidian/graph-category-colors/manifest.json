@@ -1,0 +1,9 @@
+{
+	"id": "graph-category-colors",
+	"name": "Graph Category Colors",
+	"version": "1.0.0",
+	"minAppVersion": "1.0.0",
+	"description": "Auto-color graph nodes by category prefix. Files named 'category.*.md' share a color in the graph view.",
+	"author": "pi-agent",
+	"isDesktopOnly": false
+}
