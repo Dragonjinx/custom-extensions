@@ -44,7 +44,9 @@ function getCategoryPrefix(fp) {
 
 module.exports = class GraphCategoryColorsPlugin extends Plugin {
 	async onload() {
-		this.categoryColors = new Map(); // fp → { a: 1, rgb: int }
+		this.categoryColors = new Map(); // fp → { a: int, rgb: int }
+		this._patched = new WeakSet();    // renderers with active prerender hook
+		this._preCleanups = [];           // cleanup fns for prerender hooks
 
 		await this.rebuild();
 		this.applyToGraphs();
@@ -53,7 +55,7 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		this.registerEvent(this.app.vault.on('rename', () => this.rebuild()));
 		this.registerEvent(this.app.vault.on('delete', () => this.rebuild()));
 		this.registerEvent(this.app.workspace.on('layout-change', () => {
-			setTimeout(() => this.applyToGraphs(), 500);
+			this.applyToGraphs();
 		}));
 
 		this.addCommand({
@@ -64,6 +66,9 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 	}
 
 	onunload() {
+		for (const fn of this._preCleanups) fn();
+		this._preCleanups = [];
+		this._patched = new WeakSet();
 		this.restoreGraphs();
 		this.cleanupFileExplorerStyles();
 	}
@@ -165,6 +170,17 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 
 	// --- Graph node coloring via renderer.nodeLookup ---
 
+	/** Apply colors to every node in the given renderer */
+	_applyColors(renderer) {
+		const nl = renderer?.nodeLookup;
+		if (!nl) return false;
+		let count = 0;
+		for (const [fp, color] of this.categoryColors) {
+			if (nl[fp]) { nl[fp].color = color; count++; }
+		}
+		return count > 0;
+	}
+
 	applyToGraphs() {
 		for (const viewType of ['graph', 'localgraph']) {
 			this.app.workspace.getLeavesOfType(viewType).forEach((leaf) => {
@@ -175,34 +191,37 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 
 	applyToView(view) {
 		const renderer = view?.dataEngine?.renderer;
-		const nodeLookup = renderer?.nodeLookup;
-		if (!nodeLookup) return;
+		if (!renderer) return;
 
-		for (const [fp, color] of this.categoryColors) {
-			if (nodeLookup[fp]) {
-				nodeLookup[fp].color = color;
+		// Install a prerender hook on the PIXI renderer so colors survive
+		// node re-creation (e.g. tab switch). Only once per renderer.
+		if (!this._patched.has(renderer)) {
+			this._patched.add(renderer);
+
+			// Try PIXI renderer 'prerender' event (PIXI v5+)
+			const pr = renderer.px?.renderer;
+			if (pr && typeof pr.on === 'function') {
+				const handler = () => this._applyColors(renderer);
+				pr.on('prerender', handler);
+				this._preCleanups.push(() => pr.off('prerender', handler));
 			}
 		}
 
-		if (renderer.renderCallback) {
-			renderer.renderCallback();
-		}
+		// Apply immediately and request a re-render
+		this._applyColors(renderer);
+		if (renderer.renderCallback) renderer.renderCallback();
 	}
 
 	restoreGraphs() {
 		for (const viewType of ['graph', 'localgraph']) {
 			this.app.workspace.getLeavesOfType(viewType).forEach((leaf) => {
 				const renderer = leaf.view?.dataEngine?.renderer;
-				const nodeLookup = renderer?.nodeLookup;
-				if (!nodeLookup) return;
+				const nl = renderer?.nodeLookup;
+				if (!nl) return;
 				for (const fp of this.categoryColors.keys()) {
-					if (nodeLookup[fp]) {
-						delete nodeLookup[fp].color;
-					}
+					if (nl[fp]) delete nl[fp].color;
 				}
-				if (renderer.renderCallback) {
-					renderer.renderCallback();
-				}
+				if (renderer.renderCallback) renderer.renderCallback();
 			});
 		}
 	}
