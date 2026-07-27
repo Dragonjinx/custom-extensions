@@ -213,10 +213,12 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		this.cleanupFileExplorerStyles();
 		const rules = [];
 		for (const [fp, color] of this.categoryColors) {
-			const hex = '#' + color.rgb.toString(16).padStart(6, '0');
+			const r = (color.rgb >> 16) & 0xff;
+			const g = (color.rgb >> 8) & 0xff;
+			const b = color.rgb & 0xff;
 			const path = fp.replace(/'/g, "\\'");
-			rules.push(`.nav-file-title[data-path='${path}'] { color: ${hex} !important; }`);
-			rules.push(`.nav-file-title[data-path='${path}'] .nav-file-title-content { color: ${hex} !important; }`);
+			rules.push(`.nav-file-title[data-path='${path}'] { color: rgba(${r},${g},${b},${color.a}) !important; }`);
+			rules.push(`.nav-file-title[data-path='${path}'] .nav-file-title-content { color: rgba(${r},${g},${b},${color.a}) !important; }`);
 		}
 		if (rules.length) {
 			this.fileExplorerStyle = document.createElement('style');
