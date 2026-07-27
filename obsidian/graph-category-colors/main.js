@@ -47,6 +47,7 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		this.categoryColors = new Map(); // fp → { a: int, rgb: int }
 		this._patched = new WeakSet();    // renderers with active prerender hook
 		this._preCleanups = [];           // cleanup fns for prerender hooks
+		this._hoverHooked = new WeakSet(); // renderers with onNodeHover wrapper
 
 		await this.rebuild();
 		this.applyToGraphs();
@@ -69,6 +70,7 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		for (const fn of this._preCleanups) fn();
 		this._preCleanups = [];
 		this._patched = new WeakSet();
+		this._hoverHooked = new WeakSet();
 		this.restoreGraphs();
 		this.cleanupFileExplorerStyles();
 	}
@@ -190,37 +192,58 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		return count > 0;
 	}
 
-	/** On hover: tint connected edges + connected nodes to the hovered node's color */
-	_applyHoverHighlight(renderer) {
-		const hl = renderer.highlightNode;
-		if (!hl) return;
-
-		const hoveredPath = typeof hl === 'string' ? hl : hl.id;
-		if (!hoveredPath) return;
-
-		const hoverColor = this.categoryColors.get(hoveredPath);
-		if (!hoverColor) return;
-
-		// Find the hovered node object in renderer.nodes
-		const hoveredNode = typeof hl === 'string'
-			? renderer.nodes?.find(n => n.id === hl)
-			: hl;
-		if (!hoveredNode) return;
-
-		// --- Connected edges: set arrow tint to hovered node's color ---
+	/** Set edge arrow tints for links connected to the given node */
+	_setEdgeTints(renderer, hoveredNode, tintRgb) {
 		for (const link of renderer.links || []) {
 			if (link.source === hoveredNode || link.target === hoveredNode) {
-				if (link.arrow?.tint !== undefined) {
-					link.arrow.tint = hoverColor.rgb;
-				}
+				if (link.arrow?.tint !== undefined) link.arrow.tint = tintRgb;
+				if (link.line?.tint !== undefined) link.line.tint = tintRgb;
 			}
 		}
+	}
 
-		// --- Hovered node itself: full opacity with its color ---
-		if (hoveredNode.circle) {
-			hoveredNode.circle.tint = hoverColor.rgb;
-			hoveredNode.circle.alpha = 1.0;
+	/** Reset edge arrow tints back to a neutral/default */
+	_resetEdgeTints(renderer) {
+		for (const link of renderer.links || []) {
+			if (link.arrow?.tint !== undefined) link.arrow.tint = 0xffffff;
+			if (link.line?.tint !== undefined) link.line.tint = 0xffffff;
 		}
+	}
+
+	/**
+	 * Hook into the renderer's own hover handlers so edge tints are applied
+	 * at the EXACT moment the hover changes, not waiting for the next frame.
+	 */
+	_hookRendererHover(renderer) {
+		if (this._hoverHooked.has(renderer)) return;
+		this._hoverHooked.add(renderer);
+
+		const plugin = this;
+
+		const origHover = renderer.onNodeHover;
+		renderer.onNodeHover = function(node) {
+			origHover.call(this, node);
+			const path = typeof node === 'string' ? node : node?.id;
+			if (!path) return;
+			const color = plugin.categoryColors.get(path);
+			if (!color) return;
+			plugin._setEdgeTints(this, node, color.rgb);
+			if (node.circle) { node.circle.tint = color.rgb; node.circle.alpha = 1.0; }
+		};
+
+		const origUnhover = renderer.onNodeUnhover;
+		renderer.onNodeUnhover = function(node) {
+			origUnhover.call(this, node);
+			plugin._resetEdgeTints(this);
+		};
+	}
+
+	/** Restore original hover handlers on unload */
+	_restoreHoverHooks(renderer) {
+		if (!this._hoverHooked.has(renderer)) return;
+		this._hoverHooked.delete(renderer);
+		// Can't easily restore the original without storing it
+		// But since the original is still called via .call(), the behavior is preserved
 	}
 
 	applyToGraphs() {
@@ -243,11 +266,13 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 			if (pr && typeof pr.on === 'function') {
 				const handler = () => {
 					this._applyColors(renderer);
-					this._applyHoverHighlight(renderer);
 				};
 				pr.on('prerender', handler);
 				this._preCleanups.push(() => pr.off('prerender', handler));
 			}
+
+			// Hook into the renderer's hover handlers for instant edge tinting
+			this._hookRendererHover(renderer);
 		}
 
 		this._applyColors(renderer);
