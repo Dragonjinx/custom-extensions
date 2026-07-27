@@ -48,6 +48,8 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		this._patched = new WeakSet();    // renderers with active prerender hook
 		this._preCleanups = [];           // cleanup fns for prerender hooks
 		this._hoverHooked = new WeakSet(); // renderers with onNodeHover wrapper
+		this._origLineHL = null;          // original colors.lineHighlight
+		this._origArrow = null;           // original colors.arrow
 
 		await this.rebuild();
 		this.applyToGraphs();
@@ -192,27 +194,10 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		return count > 0;
 	}
 
-	/** Set edge arrow tints for links connected to the given node */
-	_setEdgeTints(renderer, hoveredNode, tintRgb) {
-		for (const link of renderer.links || []) {
-			if (link.source === hoveredNode || link.target === hoveredNode) {
-				if (link.arrow?.tint !== undefined) link.arrow.tint = tintRgb;
-				if (link.line?.tint !== undefined) link.line.tint = tintRgb;
-			}
-		}
-	}
-
-	/** Reset edge arrow tints back to a neutral/default */
-	_resetEdgeTints(renderer) {
-		for (const link of renderer.links || []) {
-			if (link.arrow?.tint !== undefined) link.arrow.tint = 0xffffff;
-			if (link.line?.tint !== undefined) link.line.tint = 0xffffff;
-		}
-	}
-
-	/**
-	 * Hook into the renderer's own hover handlers so edge tints are applied
-	 * at the EXACT moment the hover changes, not waiting for the next frame.
+	/** 
+	 * When a node is hovered, override renderer.colors (lineHighlight + arrow)
+	 * to the hovered node's color. The renderer reads these every frame,
+	 * so this is clean and reliable — no fighting PIXI tint resets.
 	 */
 	_hookRendererHover(renderer) {
 		if (this._hoverHooked.has(renderer)) return;
@@ -227,15 +212,51 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 			if (!path) return;
 			const color = plugin.categoryColors.get(path);
 			if (!color) return;
-			plugin._setEdgeTints(this, node, color.rgb);
+
+			// Store originals once
+			if (!plugin._origLineHL) plugin._origLineHL = { ...this.colors.lineHighlight };
+			if (!plugin._origArrow) plugin._origArrow = { ...this.colors.arrow };
+
+			// Override renderer's own highlight colors to the node's color
+			this.colors.lineHighlight.rgb = color.rgb;
+			this.colors.lineHighlight.a = 1;
+			this.colors.arrow.rgb = color.rgb;
+			this.colors.arrow.a = 1;
+
+			// Hovered node circle: full brightness with its color
 			if (node.circle) { node.circle.tint = color.rgb; node.circle.alpha = 1.0; }
 		};
 
 		const origUnhover = renderer.onNodeUnhover;
 		renderer.onNodeUnhover = function(node) {
 			origUnhover.call(this, node);
-			plugin._resetEdgeTints(this);
+
+			// Restore original highlight colors
+			if (plugin._origLineHL) {
+				this.colors.lineHighlight.rgb = plugin._origLineHL.rgb;
+				this.colors.lineHighlight.a = plugin._origLineHL.a;
+			}
+			if (plugin._origArrow) {
+				this.colors.arrow.rgb = plugin._origArrow.rgb;
+				this.colors.arrow.a = plugin._origArrow.a;
+			}
 		};
+	}
+
+	/** Per-frame: re-apply override so it survives renderer reset */
+	_applyHoverEdges(renderer) {
+		const hl = renderer.highlightNode;
+		if (!hl) return;
+		const path = typeof hl === 'string' ? hl : hl.id;
+		if (!path) return;
+		const color = this.categoryColors.get(path);
+		if (!color) return;
+
+		// Re-assert colors in case renderer recalculated them
+		renderer.colors.lineHighlight.rgb = color.rgb;
+		renderer.colors.lineHighlight.a = 1;
+		renderer.colors.arrow.rgb = color.rgb;
+		renderer.colors.arrow.a = 1;
 	}
 
 	/** Restore original hover handlers on unload */
@@ -258,7 +279,7 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		const renderer = view?.dataEngine?.renderer;
 		if (!renderer) return;
 
-		// Install a prerender hook on the PIXI renderer — fires before every frame
+			// Install a prerender hook on the PIXI renderer — fires before every frame
 		if (!this._patched.has(renderer)) {
 			this._patched.add(renderer);
 
@@ -266,6 +287,7 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 			if (pr && typeof pr.on === 'function') {
 				const handler = () => {
 					this._applyColors(renderer);
+					this._applyHoverEdges(renderer);
 				};
 				pr.on('prerender', handler);
 				this._preCleanups.push(() => pr.off('prerender', handler));
