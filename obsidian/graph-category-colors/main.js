@@ -66,10 +66,12 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		this.removing = true;
 		if (this.renderRAF) { cancelAnimationFrame(this.renderRAF); this.renderRAF = null; }
 		this.cleanupOverlays();
+		this.cleanupFileExplorerStyles();
 	}
 
 	async rebuild() {
 		await this.buildColorMap();
+		this.injectFileExplorerStyles();
 		await this.writeGraphJson();
 	}
 
@@ -92,6 +94,7 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 
 	async buildColorMap() {
 		this.categoryColors.clear();
+
 		const files = this.app.vault.getMarkdownFiles();
 		const homepagePath = await this.getHomepagePath();
 		const catFiles = new Map();
@@ -121,6 +124,31 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 				this.categoryColors.set(fp, hex);
 			}
 		}
+	}
+
+	// --- File Explorer styling ---
+
+	injectFileExplorerStyles() {
+		this.cleanupFileExplorerStyles();
+		const rules = [];
+		for (const [fp, hex] of this.categoryColors) {
+			const path = fp.replace(/'/g, "\\'");
+			rules.push(`.nav-file-title[data-path='${path}'] { color: ${hex} !important; }`);
+			rules.push(`.nav-file-title[data-path='${path}'] .nav-file-title-content { color: ${hex} !important; }`);
+		}
+
+		if (rules.length) {
+			this.fileExplorerStyle = document.createElement('style');
+			this.fileExplorerStyle.id = 'graph-category-colors-file-styles';
+			this.fileExplorerStyle.textContent = rules.join('\n');
+			document.head.appendChild(this.fileExplorerStyle);
+		}
+	}
+
+	cleanupFileExplorerStyles() {
+		const existing = document.getElementById('graph-category-colors-file-styles');
+		if (existing) existing.remove();
+		this.fileExplorerStyle = null;
 	}
 
 	// --- Persistence (graph.json) — fallback for when plugin is disabled ---
