@@ -10,7 +10,7 @@ const HOMEPAGE_COLOR = '#ffffff';
 // depth 2 (category.a.b.md):     deeper  (sat=90, light=41)
 // depth 3 (category.a.b.c.md):   deeper  (sat=96, light=37)
 // depth 4+:                              approaches 100, 35
-const SAT_START = 25, SAT_ASYMP = 100;
+const SAT_START = 38, SAT_ASYMP = 100;
 const LIGHT_START = 80, LIGHT_ASYMP = 35;
 const DEPTH_TAU = 1.0; // curve steepness
 
