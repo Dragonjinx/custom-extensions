@@ -216,19 +216,6 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 			}
 		}
 
-		// --- Connected nodes: set circle tint to hovered node's color ---
-		for (const link of renderer.links || []) {
-			if (link.source === hoveredNode && link.target !== hoveredNode) {
-				if (link.target?.circle?.tint !== undefined) {
-					link.target.circle.tint = hoverColor.rgb;
-				}
-			} else if (link.target === hoveredNode && link.source !== hoveredNode) {
-				if (link.source?.circle?.tint !== undefined) {
-					link.source.circle.tint = hoverColor.rgb;
-				}
-			}
-		}
-
 		// --- Hovered node itself: full opacity with its color ---
 		if (hoveredNode.circle) {
 			hoveredNode.circle.tint = hoverColor.rgb;
