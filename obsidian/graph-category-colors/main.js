@@ -4,11 +4,19 @@ const { Plugin, Notice } = require('obsidian');
 const HUE_START = 0, HUE_END = 360;
 const HOMEPAGE_COLOR = { a: 1, rgb: 0xffffff };
 
-// Heatmap: file-age based transparency.
-// Leaf nodes fade from maxAlpha (newest) to minAlpha (oldest).
-// Category nodes get the average alpha of their leaves.
+// Heatmap: file-age based cues.
+// Age fades a node in TWO orthogonal axes:
+//   1. alpha: newest→opaque, oldest→MIN_ALPHA. Kept at 0.5 so old nodes still
+//      fade on any theme; the submodule-silhouette collision is avoided by the
+//      desaturation axis (below), not by raising this floor.
+//   2. desaturation: an old leaf loses up to AGE_DESAT of its saturation,
+//      graying it out. Desaturation is a channel submodules do NOT use
+//      (they are MORE saturated), so an aged node reads as "old", not "deep".
+//      This axis is theme-independent (works on light backgrounds too).
+// Category nodes get the average (alpha, desat) of their leaves.
 const MIN_ALPHA = 0.5;
 const MAX_ALPHA = 1.0;
+const AGE_DESAT = 0.45;
 
 // Logarithmic depth progression for saturation & lightness.
 // depth 0 (category.md):         pastel  (sat=38, light=80)
@@ -126,7 +134,8 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 		const LOG_YEAR = Math.log(1 + 365);
 		const now = Date.now();
 
-		const leafAlpha = new Map(); // fp → alpha
+		const leafAlpha = new Map();  // fp → alpha
+		const leafDesat = new Map(); // fp → desaturation [0..1]
 		for (const fps of catFiles.values()) {
 			for (const fp of fps) {
 				if (getFileDepth(fp) >= 1) {
@@ -134,19 +143,24 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 					const days = Math.max(0, ageMs / MS_DAY);
 					const t = Math.min(Math.log(1 + days) / LOG_YEAR, 1);
 					leafAlpha.set(fp, +(MAX_ALPHA - t * (MAX_ALPHA - MIN_ALPHA)).toFixed(2));
+					leafDesat.set(fp, +(AGE_DESAT * t).toFixed(3));
 				}
 			}
 		}
 
-		// Average leaf alpha per category → category node alpha
+		// Average leaf (alpha, desat) per category → category node values
 		const catAlpha = new Map(); // prefix → alpha
+		const catDesat = new Map(); // prefix → desaturation
 		for (const [prefix, fps] of catFiles) {
 			const leafs = fps.filter(fp => getFileDepth(fp) >= 1);
 			if (leafs.length) {
-				const avg = leafs.reduce((s, fp) => s + leafAlpha.get(fp), 0) / leafs.length;
-				catAlpha.set(prefix, +avg.toFixed(2));
+				const aAvg = leafs.reduce((s, fp) => s + leafAlpha.get(fp), 0) / leafs.length;
+				const dAvg = leafs.reduce((s, fp) => s + leafDesat.get(fp), 0) / leafs.length;
+				catAlpha.set(prefix, +aAvg.toFixed(2));
+				catDesat.set(prefix, +dAvg.toFixed(3));
 			} else {
 				catAlpha.set(prefix, MAX_ALPHA);
+				catDesat.set(prefix, 0);
 			}
 		}
 
@@ -158,9 +172,12 @@ module.exports = class GraphCategoryColorsPlugin extends Plugin {
 			const hue = HUE_START + (i / total) * (HUE_END - HUE_START);
 			for (const fp of catFiles.get(cat)) {
 				const depth = getFileDepth(fp);
-				const sat = SAT_ASYMP - (SAT_ASYMP - SAT_START) * Math.exp(-depth / DEPTH_TAU);
+				const baseSat = SAT_ASYMP - (SAT_ASYMP - SAT_START) * Math.exp(-depth / DEPTH_TAU);
 				const light = LIGHT_ASYMP + (LIGHT_START - LIGHT_ASYMP) * Math.exp(-depth / DEPTH_TAU);
-				const rgb = hslToRgbInt(hue, Math.round(sat), Math.round(light));
+				// Age desaturates toward gray, combined with the depth base saturation
+				const desat = depth >= 1 ? leafDesat.get(fp) : catDesat.get(cat);
+				const sat = Math.round(baseSat * (1 - desat));
+				const rgb = hslToRgbInt(hue, sat, Math.round(light));
 				const a = depth >= 1 ? leafAlpha.get(fp) : catAlpha.get(cat);
 				this.categoryColors.set(fp, { a, rgb });
 			}
